@@ -40,7 +40,7 @@
 //M*/
 
 #include "precomp.hpp"
-#include "opencl_kernels.hpp"
+#include "opencl_kernels_imgproc.hpp"
 
 #include <cstdio>
 #include <vector>
@@ -164,6 +164,12 @@ static bool ocl_goodFeaturesToTrack( InputArray _image, OutputArray _corners,
             return false;
 
         total = std::min<size_t>(counter.getMat(ACCESS_READ).at<int>(0, 0), possibleCornersCount);
+        if (total == 0)
+        {
+            _corners.release();
+            return true;
+        }
+
         tmpCorners.resize(total);
 
         Mat mcorners(1, (int)total, CV_32FC2, &tmpCorners[0]);
@@ -323,7 +329,7 @@ void cv::goodFeaturesToTrack( InputArray _image, OutputArray _corners,
 
         for( i = 0; i < total; i++ )
         {
-            int ofs = (int)((const uchar*)tmpCorners[i] - eig.data);
+            int ofs = (int)((const uchar*)tmpCorners[i] - eig.ptr());
             int y = (int)(ofs / eig.step);
             int x = (int)((ofs - y*eig.step)/sizeof(float));
 
@@ -382,7 +388,7 @@ void cv::goodFeaturesToTrack( InputArray _image, OutputArray _corners,
     {
         for( i = 0; i < total; i++ )
         {
-            int ofs = (int)((const uchar*)tmpCorners[i] - eig.data);
+            int ofs = (int)((const uchar*)tmpCorners[i] - eig.ptr());
             int y = (int)(ofs / eig.step);
             int x = (int)((ofs - y*eig.step)/sizeof(float));
 

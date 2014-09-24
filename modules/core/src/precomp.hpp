@@ -99,8 +99,6 @@ extern const float g_8x32fTab[];
 extern const ushort g_8x16uSqrTab[];
 #define CV_SQR_8U(x)  cv::g_8x16uSqrTab[(x)+255]
 
-extern const char* g_HersheyGlyphs[];
-
 extern const uchar g_Saturate8u[];
 #define CV_FAST_CAST_8U(t)   (assert(-256 <= (t) && (t) <= 512), cv::g_Saturate8u[(t)+256])
 #define CV_MIN_8U(a,b)       ((a) - CV_FAST_CAST_8U((a) - (b)))
@@ -199,10 +197,8 @@ enum { BLOCK_SIZE = 1024 };
 
 #if defined HAVE_IPP && (IPP_VERSION_MAJOR >= 7)
 #define ARITHM_USE_IPP 1
-#define IF_IPP(then_call, else_call) then_call
 #else
 #define ARITHM_USE_IPP 0
-#define IF_IPP(then_call, else_call) else_call
 #endif
 
 inline bool checkScalar(const Mat& sc, int atype, int sckind, int akind)

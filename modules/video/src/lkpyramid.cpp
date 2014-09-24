@@ -43,7 +43,7 @@
 #include <float.h>
 #include <stdio.h>
 #include "lkpyramid.hpp"
-#include "opencl_kernels.hpp"
+#include "opencl_kernels_video.hpp"
 
 #define  CV_DESCALE(x,n)     (((x) + (1 << ((n)-1))) >> (n))
 
@@ -311,11 +311,11 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
         int x, y;
         for( y = 0; y < winSize.height; y++ )
         {
-            const uchar* src = (const uchar*)I.data + (y + iprevPt.y)*stepI + iprevPt.x*cn;
-            const deriv_type* dsrc = (const deriv_type*)derivI.data + (y + iprevPt.y)*dstep + iprevPt.x*cn2;
+            const uchar* src = I.ptr() + (y + iprevPt.y)*stepI + iprevPt.x*cn;
+            const deriv_type* dsrc = derivI.ptr<deriv_type>() + (y + iprevPt.y)*dstep + iprevPt.x*cn2;
 
-            deriv_type* Iptr = (deriv_type*)(IWinBuf.data + y*IWinBuf.step);
-            deriv_type* dIptr = (deriv_type*)(derivIWinBuf.data + y*derivIWinBuf.step);
+            deriv_type* Iptr = IWinBuf.ptr<deriv_type>(y);
+            deriv_type* dIptr = derivIWinBuf.ptr<deriv_type>(y);
 
             x = 0;
 
@@ -541,9 +541,9 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
 
             for( y = 0; y < winSize.height; y++ )
             {
-                const uchar* Jptr = (const uchar*)J.data + (y + inextPt.y)*stepJ + inextPt.x*cn;
-                const deriv_type* Iptr = (const deriv_type*)(IWinBuf.data + y*IWinBuf.step);
-                const deriv_type* dIptr = (const deriv_type*)(derivIWinBuf.data + y*derivIWinBuf.step);
+                const uchar* Jptr = J.ptr() + (y + inextPt.y)*stepJ + inextPt.x*cn;
+                const deriv_type* Iptr = IWinBuf.ptr<deriv_type>(y);
+                const deriv_type* dIptr = derivIWinBuf.ptr<deriv_type>(y);
 
                 x = 0;
 
@@ -725,8 +725,8 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
 
             for( y = 0; y < winSize.height; y++ )
             {
-                const uchar* Jptr = (const uchar*)J.data + (y + inextPoint.y)*stepJ + inextPoint.x*cn;
-                const deriv_type* Iptr = (const deriv_type*)(IWinBuf.data + y*IWinBuf.step);
+                const uchar* Jptr = J.ptr() + (y + inextPoint.y)*stepJ + inextPoint.x*cn;
+                const deriv_type* Iptr = IWinBuf.ptr<deriv_type>(y);
 
                 for( x = 0; x < winSize.width*cn; x++ )
                 {
@@ -890,6 +890,26 @@ namespace cv
             std::vector<UMat> prevPyr; prevPyr.resize(maxLevel + 1);
             std::vector<UMat> nextPyr; nextPyr.resize(maxLevel + 1);
 
+            // allocate buffers with aligned pitch to be able to use cl_khr_image2d_from_buffer extention
+            // This is the required pitch alignment in pixels
+            int pitchAlign = (int)ocl::Device::getDefault().imagePitchAlignment();
+            if (pitchAlign>0)
+            {
+                prevPyr[0] = UMat(prevImg.rows,(prevImg.cols+pitchAlign-1)&(-pitchAlign),CV_32FC1).colRange(0,prevImg.cols);
+                nextPyr[0] = UMat(nextImg.rows,(nextImg.cols+pitchAlign-1)&(-pitchAlign),CV_32FC1).colRange(0,nextImg.cols);
+                for (int level = 1; level <= maxLevel; ++level)
+                {
+                    int cols,rows;
+                    // allocate buffers with aligned pitch to be able to use image on buffer extention
+                    cols = (prevPyr[level - 1].cols+1)/2;
+                    rows = (prevPyr[level - 1].rows+1)/2;
+                    prevPyr[level] = UMat(rows,(cols+pitchAlign-1)&(-pitchAlign),prevPyr[level-1].type()).colRange(0,cols);
+                    cols = (nextPyr[level - 1].cols+1)/2;
+                    rows = (nextPyr[level - 1].rows+1)/2;
+                    nextPyr[level] = UMat(rows,(cols+pitchAlign-1)&(-pitchAlign),nextPyr[level-1].type()).colRange(0,cols);
+                }
+            }
+
             prevImg.convertTo(prevPyr[0], CV_32F);
             nextImg.convertTo(nextPyr[0], CV_32F);
 
@@ -952,16 +972,6 @@ namespace cv
             block.z = patch.z = 1;
         }
 
-        #define SAFE_KERNEL_SET_ARG(idx, arg) \
-        {\
-            int idxNew = kernel.set(idx, arg);\
-            if (-1 == idxNew)\
-            {\
-                printf("lkSparse_run can't setup argument index = %d to kernel\n", idx);\
-                return false;\
-            }\
-            idx = idxNew;\
-        }
         bool lkSparse_run(UMat &I, UMat &J, const UMat &prevPts, UMat &nextPts, UMat &status, UMat& err,
             int ptcount, int level)
         {
@@ -979,16 +989,15 @@ namespace cv
             if (!kernel.create("lkSparse", cv::ocl::video::pyrlk_oclsrc, build_options))
                 return false;
 
-            ocl::Image2D imageI(I);
-            ocl::Image2D imageJ(J);
+            CV_Assert(I.depth() == CV_32F && J.depth() == CV_32F);
+            ocl::Image2D imageI(I, false, ocl::Image2D::canCreateAlias(I));
+            ocl::Image2D imageJ(J, false, ocl::Image2D::canCreateAlias(J));
+
             int idxArg = 0;
-#if 0
             idxArg = kernel.set(idxArg, imageI); //image2d_t I
             idxArg = kernel.set(idxArg, imageJ); //image2d_t J
             idxArg = kernel.set(idxArg, ocl::KernelArg::PtrReadOnly(prevPts)); // __global const float2* prevPts
-            idxArg = kernel.set(idxArg, (int)prevPts.step); // int prevPtsStep
             idxArg = kernel.set(idxArg, ocl::KernelArg::PtrReadWrite(nextPts)); // __global const float2* nextPts
-            idxArg = kernel.set(idxArg, (int)nextPts.step); //  int nextPtsStep
             idxArg = kernel.set(idxArg, ocl::KernelArg::PtrReadWrite(status)); // __global uchar* status
             idxArg = kernel.set(idxArg, ocl::KernelArg::PtrReadWrite(err)); // __global float* err
             idxArg = kernel.set(idxArg, (int)level); // const int level
@@ -1000,27 +1009,7 @@ namespace cv
             idxArg = kernel.set(idxArg, (int)winSize.height); // int c_winSize_y
             idxArg = kernel.set(idxArg, (int)iters); // int c_iters
             idxArg = kernel.set(idxArg, (char)calcErr); //char calcErr
-#else
-            SAFE_KERNEL_SET_ARG(idxArg, imageI); //image2d_t I
-            SAFE_KERNEL_SET_ARG(idxArg, imageJ); //image2d_t J
-            SAFE_KERNEL_SET_ARG(idxArg, ocl::KernelArg::PtrReadOnly(prevPts)); // __global const float2* prevPts
-            SAFE_KERNEL_SET_ARG(idxArg, (int)prevPts.step); // int prevPtsStep
-            SAFE_KERNEL_SET_ARG(idxArg, ocl::KernelArg::PtrReadWrite(nextPts)); // __global const float2* nextPts
-            SAFE_KERNEL_SET_ARG(idxArg, (int)nextPts.step); //  int nextPtsStep
-            SAFE_KERNEL_SET_ARG(idxArg, ocl::KernelArg::PtrReadWrite(status)); // __global uchar* status
-            SAFE_KERNEL_SET_ARG(idxArg, ocl::KernelArg::PtrReadWrite(err)); // __global float* err
-            SAFE_KERNEL_SET_ARG(idxArg, (int)level); // const int level
-            SAFE_KERNEL_SET_ARG(idxArg, (int)I.rows); // const int rows
-            SAFE_KERNEL_SET_ARG(idxArg, (int)I.cols); // const int cols
-            SAFE_KERNEL_SET_ARG(idxArg, (int)patch.x); // int PATCH_X
-            SAFE_KERNEL_SET_ARG(idxArg, (int)patch.y); // int PATCH_Y
-            SAFE_KERNEL_SET_ARG(idxArg, (int)winSize.width); // int c_winSize_x
-            SAFE_KERNEL_SET_ARG(idxArg, (int)winSize.height); // int c_winSize_y
-            SAFE_KERNEL_SET_ARG(idxArg, (int)iters); // int c_iters
-            SAFE_KERNEL_SET_ARG(idxArg, (char)calcErr); //char calcErr
-#endif
-
-            return kernel.run(2, globalThreads, localThreads, true);
+            return kernel.run(2, globalThreads, localThreads, false);
         }
     private:
         inline static bool isDeviceCPU()
@@ -1103,7 +1092,9 @@ void cv::calcOpticalFlowPyrLK( InputArray _prevImg, InputArray _nextImg,
                            TermCriteria criteria,
                            int flags, double minEigThreshold )
 {
-    bool use_opencl = ocl::useOpenCL() && (_prevImg.isUMat() || _nextImg.isUMat());
+    bool use_opencl = ocl::useOpenCL() &&
+                      (_prevImg.isUMat() || _nextImg.isUMat()) &&
+                      ocl::Image2D::isFormatSupported(CV_32F, 1, false);
     if ( use_opencl && ocl_calcOpticalFlowPyrLK(_prevImg, _nextImg, _prevPts, _nextPts, _status, _err, winSize, maxLevel, criteria, flags/*, minEigThreshold*/))
         return;
 
@@ -1129,13 +1120,13 @@ void cv::calcOpticalFlowPyrLK( InputArray _prevImg, InputArray _nextImg,
     Mat nextPtsMat = _nextPts.getMat();
     CV_Assert( nextPtsMat.checkVector(2, CV_32F, true) == npoints );
 
-    const Point2f* prevPts = (const Point2f*)prevPtsMat.data;
-    Point2f* nextPts = (Point2f*)nextPtsMat.data;
+    const Point2f* prevPts = prevPtsMat.ptr<Point2f>();
+    Point2f* nextPts = nextPtsMat.ptr<Point2f>();
 
     _status.create((int)npoints, 1, CV_8U, -1, true);
     Mat statusMat = _status.getMat(), errMat;
     CV_Assert( statusMat.isContinuous() );
-    uchar* status = statusMat.data;
+    uchar* status = statusMat.ptr();
     float* err = 0;
 
     for( i = 0; i < npoints; i++ )
@@ -1146,7 +1137,7 @@ void cv::calcOpticalFlowPyrLK( InputArray _prevImg, InputArray _nextImg,
         _err.create((int)npoints, 1, CV_32F, -1, true);
         errMat = _err.getMat();
         CV_Assert( errMat.isContinuous() );
-        err = (float*)errMat.data;
+        err = errMat.ptr<float>();
     }
 
     std::vector<Mat> prevPyr, nextPyr;
@@ -1239,7 +1230,7 @@ void cv::calcOpticalFlowPyrLK( InputArray _prevImg, InputArray _nextImg,
         {
             Size imgSize = prevPyr[level * lvlStep1].size();
             Mat _derivI( imgSize.height + winSize.height*2,
-                imgSize.width + winSize.width*2, derivIBuf.type(), derivIBuf.data );
+                imgSize.width + winSize.width*2, derivIBuf.type(), derivIBuf.ptr() );
             derivI = _derivI(Rect(winSize.width, winSize.height, imgSize.width, imgSize.height));
             calcSharrDeriv(prevPyr[level * lvlStep1], derivI);
             copyMakeBorder(derivI, _derivI, winSize.height, winSize.height, winSize.width, winSize.width, BORDER_CONSTANT|BORDER_ISOLATED);
